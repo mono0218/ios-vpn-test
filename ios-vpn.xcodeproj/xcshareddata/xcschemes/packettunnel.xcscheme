@@ -16,7 +16,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "53C2D0A02DDB47B10053DFE5"
+               BlueprintIdentifier = "53C2D0F42DDDF4B70053DFE5"
                BuildableName = "packettunnel.appex"
                BlueprintName = "packettunnel"
                ReferencedContainer = "container:ios-vpn.xcodeproj">

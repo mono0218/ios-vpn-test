@@ -10,6 +10,9 @@ extension Data {
 }
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
+    private var tcpSessions = [String: TCPSession]()
+    private var udpSessions = [String: UDPSession]()
+    private var packetBuilder: PacketBuilder?
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         NSLog("Starting tunnel with options: \(options ?? [:])")
@@ -52,11 +55,108 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func localPacketsToServer() {
         packetFlow.readPacketObjects { [weak self] (packets) in
             defer { self?.localPacketsToServer() }
+            guard let self = self else { return }
             packets.forEach { (packet) in
                 if let name = parseDNSDomain(from: packet.data), !name.isEmpty {
                     NSLog(name)
                 }
+
+                if let ipPacket = IPPacket(packet.data) {
+                    switch ipPacket.proto {
+                    case .tcp:
+                        self.handleTCPPacket(ipPacket)
+                    case .udp:
+                        self.sendUDPPacket(ipPacket)
+                    case .icmp:
+                        break
+                    }
+                }
             }
+        }
+    }
+    
+    private func handleTCPPacket(_ packet: IPPacket) {
+        if packetBuilder == nil {
+            packetBuilder = PacketBuilder(
+                sourceIP: packet.source,
+                destinationIP: packet.destination,
+                sourcePort: packet.sourcePort,
+                destinationPort: packet.destinationPort
+            )
+        }
+        sendTCPPacket(packet)
+    }
+    
+    private func sendTCPPacket(_ packet: IPPacket) {
+        let tcpSession = TCPSession(
+            host: packet.destination,
+            port: packet.destinationPort,
+            payload: packet.payload
+        )
+
+        let header = packet.tcpHeader
+        if header.isSyn {
+            packetFlow.writePacketObjects(
+                packetBuilder!.replySynAck())
+        } else if header.isAck {
+            if packet.payload.count > 0 {
+                tcpSession.send(packet.payload)
+                tcpSession.onReceive = { [weak self] data in
+                    guard let self = self else { return }
+                    
+                    packetFlow.writePacketObjects([
+                        NEPacket(
+                            data: data,
+                            protocolFamily: sa_family_t(AF_INET)
+                        )
+                    ])
+                }
+            } else {
+                packetFlow.writePacketObjects(
+                    packetBuilder!.ackFinAck())
+            }
+        } else if header.isFin {
+            packetFlow.writePacketObjects(packetBuilder!.ackFinAck())
+        } else if header.isRst {
+            packetFlow.writePacketObjects(packetBuilder!.reset())
+        }
+    }
+    
+    func sendUDPPacket(_ packet: IPPacket) {
+        let key = "\(packet.source):\(packet.sourcePort) => \(packet.destination):\(packet.destinationPort)"
+
+        if let session = self.udpSessions[key] {
+            session.send(packet.payload)
+        } else {
+            let session = UDPSession(
+                host: packet.destination,
+                port: packet.destinationPort,
+                payload: packet.payload
+            )
+            session.onReceive = { [weak self] (data) in
+                guard let self = self else { return }
+
+                let packet = IPPacket(
+                    proto: packet.proto,
+                    source: packet.destination,
+                    destination: packet.source,
+                    sourcePort: packet.destinationPort,
+                    destinationPort: packet.sourcePort,
+                    payload: data
+                )
+
+                self.packetFlow.writePacketObjects([
+                    NEPacket(
+                        data: packet.packetData,
+                        protocolFamily: sa_family_t(AF_INET)
+                    )
+                ])
+            }
+            session.onError = { (error) in
+                NSLog("UDP Error: \(error)")
+            }
+
+            self.udpSessions[key] = session
         }
     }
     
